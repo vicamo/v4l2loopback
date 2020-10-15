@@ -2030,6 +2030,7 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 {
 	struct v4l2_loopback_device *dev;
 	struct v4l2_ctrl_handler *hdl;
+	struct video_device *vdev;
 
 	int err = -ENOMEM;
 	unsigned int index;
@@ -2130,18 +2131,18 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 	if (err)
 		goto out_free_idr;
 
-	dev->vdev = video_device_alloc();
-	if (dev->vdev == NULL) {
+	vdev = video_device_alloc();
+	if (vdev == NULL) {
 		err = -ENOMEM;
 		goto out_unregister;
 	}
 
-	snprintf(dev->vdev->name, sizeof(dev->vdev->name), "%s",
-		 dev->card_label);
-	video_set_drvdata(dev->vdev, ERR_PTR(capture_nr));
+	dev->vdev = vdev;
+	snprintf(vdev->name, sizeof(vdev->name), "%s", dev->card_label);
+	video_set_drvdata(vdev, ERR_PTR(capture_nr));
 
-	init_vdev(dev->vdev, conf->debug);
-	dev->vdev->v4l2_dev = &dev->v4l2_dev;
+	init_vdev(vdev, conf->debug);
+	vdev->v4l2_dev = &dev->v4l2_dev;
 
 	hdl = &dev->ctrl_handler;
 	err = v4l2_ctrl_handler_init(hdl, 4);
@@ -2162,20 +2163,20 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 		goto out_free_handler;
 
 	/* register the device -> it creates /dev/video* */
-	if (video_register_device(dev->vdev, VFL_TYPE_VIDEO, capture_nr) < 0) {
+	if (video_register_device(vdev, VFL_TYPE_VIDEO, capture_nr) < 0) {
 		printk(KERN_ERR
 		       "v4l2loopback: failed video_register_device()\n");
 		err = -EFAULT;
 		goto out_free_handler;
 	}
-	v4l2loopback_create_sysfs(dev->vdev);
+	v4l2loopback_create_sysfs(vdev);
 
 	return dev;
 
 out_free_handler:
 	v4l2_ctrl_handler_free(&dev->ctrl_handler);
 out_free_vdev:
-	video_device_release(dev->vdev);
+	video_device_release(vdev);
 out_unregister:
 	v4l2_device_unregister(&dev->v4l2_dev);
 out_free_idr:
@@ -2189,9 +2190,11 @@ out_err:
 
 static void v4l2_loopback_remove(struct v4l2_loopback_device *dev)
 {
+	struct video_device *vdev = dev->vdev;
+
 	free_buffers(dev);
-	v4l2loopback_remove_sysfs(dev->vdev);
-	video_unregister_device(dev->vdev);
+	v4l2loopback_remove_sysfs(vdev);
+	video_unregister_device(vdev);
 	v4l2_device_unregister(&dev->v4l2_dev);
 	v4l2_ctrl_handler_free(&dev->ctrl_handler);
 	kfree(dev);
