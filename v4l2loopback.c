@@ -307,7 +307,7 @@ struct v4l2_loopback_device {
 	struct v4l2_device v4l2_dev;
 	struct v4l2_ctrl_handler ctrl_handler;
 	int output_nr;
-	struct video_device *vdev;
+	struct video_device vdev;
 	/* pixel and stream format */
 	struct v4l2_pix_format pix_format;
 	struct v4l2_captureparm capture_param;
@@ -526,9 +526,9 @@ static int v4l2loopback_lookup_cb(int id, void *ptr, void *data)
 {
 	struct v4l2_loopback_device *device = ptr;
 	struct v4l2loopback_lookup_cb_data *cbdata = data;
-	if (cbdata && device && device->vdev) {
+	if (cbdata && device) {
 		if (device->output_nr == cbdata->device_nr ||
-		    device->vdev->num == cbdata->device_nr) {
+		    device->vdev.num == cbdata->device_nr) {
 			cbdata->device = device;
 			return 1;
 		}
@@ -598,7 +598,7 @@ static int vidioc_querycap(struct file *file, void *priv,
 			   struct v4l2_capability *cap)
 {
 	struct v4l2_loopback_device *dev = v4l2loopback_getdevice(file);
-	int device_nr = PTR_ERR(video_get_drvdata(dev->vdev));
+	int device_nr = PTR_ERR(video_get_drvdata(&dev->vdev));
 	__u32 capabilities = V4L2_CAP_STREAMING | V4L2_CAP_READWRITE;
 
 	strlcpy(cap->driver, "v4l2 loopback", sizeof(cap->driver));
@@ -618,7 +618,7 @@ static int vidioc_querycap(struct file *file, void *priv,
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
-	dev->vdev->device_caps =
+	dev->vdev.device_caps =
 #endif /* >=linux-4.7.0 */
 		cap->device_caps = cap->capabilities = capabilities;
 
@@ -1942,7 +1942,7 @@ static void init_vdev(struct video_device *vdev, u32 debug)
 	vdev->vfl_type = VFL_TYPE_VIDEO;
 	vdev->fops = &v4l2_loopback_fops;
 	vdev->ioctl_ops = &v4l2_loopback_ioctl_ops;
-	vdev->release = &video_device_release;
+	vdev->release = &video_device_release_empty;
 	vdev->minor = -1;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
 	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_OUTPUT |
@@ -2131,13 +2131,7 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 	if (err)
 		goto out_free_idr;
 
-	vdev = video_device_alloc();
-	if (vdev == NULL) {
-		err = -ENOMEM;
-		goto out_unregister;
-	}
-
-	dev->vdev = vdev;
+	vdev = &dev->vdev;
 	snprintf(vdev->name, sizeof(vdev->name), "%s", dev->card_label);
 	video_set_drvdata(vdev, ERR_PTR(capture_nr));
 
@@ -2147,7 +2141,7 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 	hdl = &dev->ctrl_handler;
 	err = v4l2_ctrl_handler_init(hdl, 4);
 	if (err)
-		goto out_free_vdev;
+		goto out_unregister;
 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_keepformat, NULL);
 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_sustainframerate, NULL);
 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_timeout, NULL);
@@ -2175,9 +2169,8 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 
 out_free_handler:
 	v4l2_ctrl_handler_free(&dev->ctrl_handler);
-out_free_vdev:
-	video_device_release(vdev);
 out_unregister:
+	video_device_release_empty(vdev);
 	v4l2_device_unregister(&dev->v4l2_dev);
 out_free_idr:
 	idr_remove(&v4l2loopback_index_idr, output_nr);
@@ -2190,11 +2183,12 @@ out_err:
 
 static void v4l2_loopback_remove(struct v4l2_loopback_device *dev)
 {
-	struct video_device *vdev = dev->vdev;
+	struct video_device *vdev = &dev->vdev;
 
 	free_buffers(dev);
 	v4l2loopback_remove_sysfs(vdev);
 	video_unregister_device(vdev);
+	video_device_release_empty(vdev);
 	v4l2_device_unregister(&dev->v4l2_dev);
 	v4l2_ctrl_handler_free(&dev->ctrl_handler);
 	kfree(dev);
@@ -2229,7 +2223,7 @@ static long v4l2loopback_control_ioctl(struct file *file, unsigned int cmd,
 		if (IS_ERR(dev))
 			ret = PTR_ERR(dev);
 		else
-			ret = dev->vdev->num;
+			ret = dev->vdev.num;
 		break;
 		/* remove a v4l2loopback device (both capture and output) */
 	case V4L2LOOPBACK_CTL_REMOVE:
@@ -2240,7 +2234,7 @@ static long v4l2loopback_control_ioctl(struct file *file, unsigned int cmd,
 			ret = -EBUSY;
 		else {
 			idr_remove(&v4l2loopback_index_idr, dev->output_nr);
-			idr_remove(&v4l2loopback_index_idr, dev->vdev->num);
+			idr_remove(&v4l2loopback_index_idr, dev->vdev.num);
 			v4l2_loopback_remove(dev);
 			ret = 0;
 		};
@@ -2273,12 +2267,12 @@ static long v4l2loopback_control_ioctl(struct file *file, unsigned int cmd,
 		snprintf(conf.card_label, sizeof(conf.card_label), "%s",
 			 dev->card_label);
 		conf.output_nr = dev->output_nr;
-		conf.capture_nr = dev->vdev->num;
+		conf.capture_nr = dev->vdev.num;
 		conf.max_width = dev->max_width;
 		conf.max_height = dev->max_height;
 		conf.announce_all_caps = dev->announce_all_caps;
 		conf.max_buffers = dev->buffers_number;
-		conf.debug = dev->vdev->dev_debug;
+		conf.debug = dev->vdev.dev_debug;
 
 		if (copy_to_user((void *)parm, &conf, sizeof(conf))) {
 			ret = -EFAULT;
@@ -2465,7 +2459,7 @@ static int v4l2loopback_init_module(void)
 			err = PTR_ERR(dev);
 			goto error;
 		}
-		video_nr[i] = dev->vdev->num;
+		video_nr[i] = dev->vdev.num;
 		output_nr[i] = dev->output_nr;
 	}
 
