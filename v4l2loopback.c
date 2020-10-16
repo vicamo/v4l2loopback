@@ -291,7 +291,6 @@ struct v4l2l_buffer {
 struct v4l2_loopback_device {
 	struct v4l2_device v4l2_dev;
 	struct v4l2_ctrl_handler ctrl_handler;
-	int output_nr;
 	struct v4l2_loopback_entity {
 		struct video_device vdev;
 	} capture, output;
@@ -512,7 +511,7 @@ static int v4l2loopback_lookup_cb(int id, void *ptr, void *data)
 	struct v4l2_loopback_device *device = ptr;
 	struct v4l2loopback_lookup_cb_data *cbdata = data;
 	if (cbdata && device) {
-		if (device->output_nr == cbdata->device_nr ||
+		if (device->output.vdev.num == cbdata->device_nr ||
 		    device->capture.vdev.num == cbdata->device_nr) {
 			cbdata->device = device;
 			return 1;
@@ -2065,9 +2064,6 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 
 	dprintk("creating v4l2loopback-device %d:%d\n", output_nr, capture_nr);
 
-	/* Save output_nr somewhere before spliting device is supported. */
-	dev->output_nr = output_nr;
-
 	if (conf && conf->card_label[0]) {
 		snprintf(dev->card_label, sizeof(dev->card_label), "%s",
 			 conf->card_label);
@@ -2224,7 +2220,8 @@ static long v4l2loopback_control_ioctl(struct file *file, unsigned int cmd,
 		else if (dev->open_count.counter > 0)
 			ret = -EBUSY;
 		else {
-			idr_remove(&v4l2loopback_index_idr, dev->output_nr);
+			idr_remove(&v4l2loopback_index_idr,
+				   dev->output.vdev.num);
 			idr_remove(&v4l2loopback_index_idr,
 				   dev->capture.vdev.num);
 			v4l2_loopback_remove(dev);
@@ -2258,7 +2255,7 @@ static long v4l2loopback_control_ioctl(struct file *file, unsigned int cmd,
 		/* v4l2_loopback_config identified a single device, so fetch the data */
 		snprintf(conf.card_label, sizeof(conf.card_label), "%s",
 			 dev->card_label);
-		conf.output_nr = dev->output_nr;
+		conf.output_nr = dev->output.vdev.num;
 		conf.capture_nr = dev->capture.vdev.num;
 		conf.max_width = dev->max_width;
 		conf.max_height = dev->max_height;
@@ -2406,7 +2403,7 @@ static int free_device_cb(int id, void *ptr, void *data)
 	 * so here we only have to deal with fully instanciated devices. In
 	 * order to avoid double free, free only when id matches its output_nr.
 	 */
-	if (id == dev->output_nr)
+	if (id == dev->output.vdev.num)
 		v4l2_loopback_remove(dev);
 
 	return 0;
@@ -2491,7 +2488,7 @@ static int v4l2loopback_init_module(void)
 			goto error;
 		}
 		video_nr[i] = dev->capture.vdev.num;
-		output_nr[i] = dev->output_nr;
+		output_nr[i] = dev->output.vdev.num;
 	}
 
 	printk(KERN_INFO "v4l2loopback driver version %u.%u.%u%s loaded\n",
