@@ -26,6 +26,8 @@
 #include <linux/eventpoll.h>
 #include <media/v4l2-ioctl.h>
 #include <media/v4l2-common.h>
+#include <media/videobuf2-v4l2.h>
+#include <media/videobuf2-vmalloc.h>
 #include <media/v4l2-device.h>
 #include <media/v4l2-ctrls.h>
 #include <media/v4l2-event.h>
@@ -293,6 +295,8 @@ struct v4l2_loopback_device {
 	struct v4l2_ctrl_handler ctrl_handler;
 	struct v4l2_loopback_entity {
 		struct video_device vdev;
+		struct vb2_queue vidq;
+		struct mutex lock;
 	} capture, output;
 	/* pixel and stream format */
 	struct v4l2_pix_format pix_format;
@@ -539,8 +543,10 @@ static int allocate_timeout_image(struct v4l2_loopback_device *dev);
 static void check_timers(struct v4l2_loopback_device *dev);
 static const struct v4l2_file_operations fops_out;
 static const struct v4l2_ioctl_ops ioctl_ops_out;
+static const struct vb2_ops qops_out;
 static const struct v4l2_file_operations fops_cap;
 static const struct v4l2_ioctl_ops ioctl_ops_cap;
+static const struct vb2_ops qops_cap;
 
 /* Queue helpers */
 /* next functions sets buffer flags and adjusts counters accordingly */
@@ -1904,6 +1910,8 @@ static int init_entity(struct v4l2_loopback_entity *entity, int nr, int type,
 		       u32 debug, struct v4l2_loopback_device *dev)
 {
 	struct video_device *vdev = &entity->vdev;
+	struct vb2_queue *q;
+	int err;
 
 	snprintf(vdev->name, sizeof(vdev->name), "%s", dev->card_label);
 	vdev->v4l2_dev = &dev->v4l2_dev;
@@ -1921,15 +1929,33 @@ static int init_entity(struct v4l2_loopback_entity *entity, int nr, int type,
 #endif /* >=linux-4.7.0 */
 	vdev->dev_debug = debug;
 
+	vdev->queue = q = &entity->vidq;
+	vdev->lock = q->lock = &entity->lock;
+	q->io_modes = VB2_MMAP | VB2_USERPTR | VB2_DMABUF | VB2_WRITE;
+	q->gfp_flags = 0;
+	q->min_buffers_needed = 1;
+	q->drv_priv = vdev;
+	q->buf_struct_size = sizeof(struct v4l2l_buffer);
+	q->mem_ops = &vb2_vmalloc_memops;
+	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+
 	if (type == V4L2_CAP_VIDEO_OUTPUT) {
 		vdev->vfl_dir = VFL_DIR_TX;
 		vdev->fops = &fops_out;
 		vdev->ioctl_ops = &ioctl_ops_out;
+		q->type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
+		q->ops = &qops_out;
 	} else {
 		vdev->vfl_dir = VFL_DIR_RX;
 		vdev->fops = &fops_cap;
 		vdev->ioctl_ops = &ioctl_ops_cap;
+		q->type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+		q->ops = &qops_cap;
 	}
+
+	err = vb2_queue_init(q);
+	if (err < 0)
+		return err;
 
 	/* register the device -> it creates /dev/video* */
 	if (video_register_device(vdev, VFL_TYPE_VIDEO, nr) < 0) {
@@ -2352,6 +2378,8 @@ static const struct v4l2_ioctl_ops ioctl_ops_out = {
 	// clang-format on
 };
 
+static const struct vb2_ops qops_out = {};
+
 static const struct v4l2_file_operations fops_cap = {
 	// clang-format off
 	.owner		= THIS_MODULE,
@@ -2401,6 +2429,8 @@ static const struct v4l2_ioctl_ops ioctl_ops_cap = {
 	.vidioc_unsubscribe_event	= v4l2_event_unsubscribe,
 	// clang-format on
 };
+
+static const struct vb2_ops qops_cap = {};
 
 static int free_device_cb(int id, void *ptr, void *data)
 {
