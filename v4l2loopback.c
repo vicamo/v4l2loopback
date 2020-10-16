@@ -301,6 +301,7 @@ struct v4l2_loopback_device {
 	struct v4l2_loopback_entity {
 		struct video_device vdev;
 		struct vb2_queue vidq;
+		struct list_head outbufs_list; /* buffers in DQBUF order */
 		struct mutex lock;
 	} capture, output;
 	/* pixel and stream format */
@@ -1188,6 +1189,51 @@ static int allocate_timeout_image(struct v4l2_loopback_device *dev)
 	return 0;
 }
 
+static int qops_buf_init(struct vb2_buffer *vb)
+{
+	struct vb2_v4l2_buffer *vb_v4l2 = to_vb2_v4l2_buffer(vb);
+	struct v4l2l_buffer *buf = to_v4l2l_buffer(vb_v4l2);
+
+	INIT_LIST_HEAD(&buf->list_head);
+
+	return 0;
+}
+
+static void qops_buf_finish(struct vb2_buffer *vb)
+{
+	struct vb2_v4l2_buffer *vb_v4l2 = to_vb2_v4l2_buffer(vb);
+	struct v4l2l_buffer *buf = to_v4l2l_buffer(vb_v4l2);
+
+	list_del(&buf->list_head);
+}
+
+static void qops_buf_queue(struct vb2_buffer *vb)
+{
+	struct video_device *vdev = vb2_get_drv_priv(vb->vb2_queue);
+	struct v4l2_loopback_entity *entity =
+		container_of(vdev, struct v4l2_loopback_entity, vdev);
+	struct vb2_v4l2_buffer *vb_v4l2 = to_vb2_v4l2_buffer(vb);
+	struct v4l2l_buffer *buf = to_v4l2l_buffer(vb_v4l2);
+
+	list_add_tail(&buf->list_head, &entity->outbufs_list);
+}
+
+static void qops_stop_streaming(struct vb2_queue *q)
+{
+	struct video_device *vdev = vb2_get_drv_priv(q);
+	struct v4l2_loopback_entity *entity =
+		container_of(vdev, struct v4l2_loopback_entity, vdev);
+	struct v4l2l_buffer *buf;
+	struct list_head *pos, *n;
+
+	list_for_each_safe (pos, n, &entity->outbufs_list) {
+		buf = list_entry(pos, struct v4l2l_buffer, list_head);
+		if (buf->vb2_v4l2_buf.vb2_buf.state == VB2_BUF_STATE_ACTIVE)
+			vb2_buffer_done(&buf->vb2_v4l2_buf.vb2_buf,
+					VB2_BUF_STATE_ERROR);
+	}
+}
+
 /* fills and register video device */
 static int init_entity(struct v4l2_loopback_entity *entity, int nr, int type,
 		       u32 debug, struct v4l2_loopback_device *dev)
@@ -1221,6 +1267,7 @@ static int init_entity(struct v4l2_loopback_entity *entity, int nr, int type,
 	q->buf_struct_size = sizeof(struct v4l2l_buffer);
 	q->mem_ops = &vb2_vmalloc_memops;
 	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
+	INIT_LIST_HEAD(&entity->outbufs_list);
 
 	if (type == V4L2_CAP_VIDEO_OUTPUT) {
 		vdev->vfl_dir = VFL_DIR_TX;
@@ -1662,7 +1709,14 @@ static const struct v4l2_ioctl_ops ioctl_ops_out = {
 	// clang-format on
 };
 
-static const struct vb2_ops qops_out = {};
+static const struct vb2_ops qops_out = {
+	// clang-format off
+	.buf_init               = qops_buf_init,
+	.buf_finish             = qops_buf_finish,
+	.buf_queue              = qops_buf_queue,
+	.stop_streaming         = qops_stop_streaming,
+	// clang-format on
+};
 
 static const struct v4l2_file_operations fops_cap = {
 	// clang-format off
@@ -1715,7 +1769,14 @@ static const struct v4l2_ioctl_ops ioctl_ops_cap = {
 	// clang-format on
 };
 
-static const struct vb2_ops qops_cap = {};
+static const struct vb2_ops qops_cap = {
+	// clang-format off
+	.buf_init               = qops_buf_init,
+	.buf_finish             = qops_buf_finish,
+	.buf_queue              = qops_buf_queue,
+	.stop_streaming         = qops_stop_streaming,
+	// clang-format on
+};
 
 static int free_device_cb(int id, void *ptr, void *data)
 {
