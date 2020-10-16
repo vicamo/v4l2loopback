@@ -1921,8 +1921,13 @@ static int allocate_timeout_image(struct v4l2_loopback_device *dev)
 }
 
 /* fills and register video device */
-static void init_vdev(struct video_device *vdev, u32 debug)
+static int init_vdev(struct video_device *vdev, int nr, u32 debug,
+		     struct v4l2_loopback_device *dev)
 {
+	snprintf(vdev->name, sizeof(vdev->name), "%s", dev->card_label);
+	vdev->v4l2_dev = &dev->v4l2_dev;
+	video_set_drvdata(vdev, dev);
+
 #ifdef V4L2LOOPBACK_WITH_STD
 	vdev->tvnorms = V4L2_STD_ALL;
 #endif /* V4L2LOOPBACK_WITH_STD */
@@ -1938,6 +1943,17 @@ static void init_vdev(struct video_device *vdev, u32 debug)
 #endif /* >=linux-4.7.0 */
 	vdev->dev_debug = debug;
 	vdev->vfl_dir = VFL_DIR_M2M;
+
+	/* register the device -> it creates /dev/video* */
+	if (video_register_device(vdev, VFL_TYPE_VIDEO, nr) < 0) {
+		printk(KERN_ERR
+		       "v4l2loopback: failed video_register_device()\n");
+		return -EFAULT;
+	}
+
+	v4l2loopback_create_sysfs(vdev);
+
+	return 0;
 }
 
 /* init default capture parameters, only fps may be changed in future */
@@ -2120,16 +2136,13 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 		goto out_free_idr;
 
 	vdev = &dev->capture.vdev;
-	snprintf(vdev->name, sizeof(vdev->name), "%s", dev->card_label);
-	video_set_drvdata(vdev, dev);
-
-	init_vdev(vdev, conf->debug);
-	vdev->v4l2_dev = &dev->v4l2_dev;
+	if (init_vdev(vdev, capture_nr, conf->debug, dev))
+		goto out_unregister;
 
 	hdl = &dev->ctrl_handler;
 	err = v4l2_ctrl_handler_init(hdl, 4);
 	if (err)
-		goto out_unregister;
+		goto out_free_vdev;
 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_keepformat, NULL);
 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_sustainframerate, NULL);
 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_timeout, NULL);
@@ -2144,21 +2157,14 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 	if (err)
 		goto out_free_handler;
 
-	/* register the device -> it creates /dev/video* */
-	if (video_register_device(vdev, VFL_TYPE_VIDEO, capture_nr) < 0) {
-		printk(KERN_ERR
-		       "v4l2loopback: failed video_register_device()\n");
-		err = -EFAULT;
-		goto out_free_handler;
-	}
-	v4l2loopback_create_sysfs(vdev);
-
 	return dev;
 
 out_free_handler:
 	v4l2_ctrl_handler_free(&dev->ctrl_handler);
-out_unregister:
+out_free_vdev:
+	v4l2loopback_remove_sysfs(vdev);
 	video_device_release_empty(vdev);
+out_unregister:
 	v4l2_device_unregister(&dev->v4l2_dev);
 out_free_idr:
 	idr_remove(&v4l2loopback_index_idr, output_nr);
