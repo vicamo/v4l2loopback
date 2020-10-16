@@ -303,6 +303,7 @@ struct v4l2_loopback_device {
 		struct vb2_queue vidq;
 		struct list_head outbufs_list; /* buffers in DQBUF order */
 		struct mutex lock;
+		int streaming : 1;
 	} capture, output;
 	/* pixel and stream format */
 	struct v4l2_pix_format pix_format;
@@ -1189,12 +1190,53 @@ static int allocate_timeout_image(struct v4l2_loopback_device *dev)
 	return 0;
 }
 
+static int qops_queue_setup(struct vb2_queue *q, unsigned int *num_buffers,
+			    unsigned int *num_planes, unsigned int sizes[],
+			    struct device *alloc_devs[])
+{
+	struct video_device *vdev = vb2_get_drv_priv(q);
+	struct v4l2_loopback_device *dev = video_get_drvdata(vdev);
+	unsigned int size;
+
+	size = dev->buffer_size;
+	if (*num_buffers > max_buffers)
+		*num_buffers = max_buffers;
+
+	/* When called with plane sizes, validate them. v4l2loopback supports
+	 * single planar formats only, and requires buffers to be large enough
+	 * to store a complete frame.
+	 */
+	if (*num_planes)
+		return *num_planes != 1 || sizes[0] < size ? -EINVAL : 0;
+
+	*num_planes = 1;
+	sizes[0] = size;
+	return 0;
+}
+
 static int qops_buf_init(struct vb2_buffer *vb)
 {
 	struct vb2_v4l2_buffer *vb_v4l2 = to_vb2_v4l2_buffer(vb);
 	struct v4l2l_buffer *buf = to_v4l2l_buffer(vb_v4l2);
 
 	INIT_LIST_HEAD(&buf->list_head);
+
+	return 0;
+}
+
+static int qops_buf_prepare(struct vb2_buffer *vb)
+{
+	struct video_device *vdev = vb2_get_drv_priv(vb->vb2_queue);
+	struct v4l2_loopback_device *dev = video_get_drvdata(vdev);
+	unsigned long size;
+
+	size = dev->buffer_size;
+	if (vb2_plane_size(vb, 0) < size) {
+		v4l2_err(&dev->v4l2_dev,
+			 "%s data will not fit into plane (%lu < %lu)\n",
+			 __func__, vb2_plane_size(vb, 0), size);
+		return -EINVAL;
+	}
 
 	return 0;
 }
@@ -1216,6 +1258,22 @@ static void qops_buf_queue(struct vb2_buffer *vb)
 	struct v4l2l_buffer *buf = to_v4l2l_buffer(vb_v4l2);
 
 	list_add_tail(&buf->list_head, &entity->outbufs_list);
+
+	if (!entity->streaming)
+		return;
+	/* TODO: wake readers */
+}
+
+static int qops_start_streaming(struct vb2_queue *q, unsigned int count)
+{
+	struct video_device *vdev = vb2_get_drv_priv(q);
+	struct v4l2_loopback_entity *entity =
+		container_of(vdev, struct v4l2_loopback_entity, vdev);
+
+	entity->streaming = 1;
+	/* TODO: wake readers */
+
+	return 0;
 }
 
 static void qops_stop_streaming(struct vb2_queue *q)
@@ -1711,9 +1769,14 @@ static const struct v4l2_ioctl_ops ioctl_ops_out = {
 
 static const struct vb2_ops qops_out = {
 	// clang-format off
+	.queue_setup            = qops_queue_setup,
 	.buf_init               = qops_buf_init,
+	.buf_prepare            = qops_buf_prepare,
 	.buf_finish             = qops_buf_finish,
 	.buf_queue              = qops_buf_queue,
+	.wait_prepare           = vb2_ops_wait_prepare,
+	.wait_finish            = vb2_ops_wait_finish,
+	.start_streaming        = qops_start_streaming,
 	.stop_streaming         = qops_stop_streaming,
 	// clang-format on
 };
@@ -1771,9 +1834,14 @@ static const struct v4l2_ioctl_ops ioctl_ops_cap = {
 
 static const struct vb2_ops qops_cap = {
 	// clang-format off
+	.queue_setup            = qops_queue_setup,
 	.buf_init               = qops_buf_init,
+	.buf_prepare            = qops_buf_prepare,
 	.buf_finish             = qops_buf_finish,
 	.buf_queue              = qops_buf_queue,
+	.wait_prepare           = vb2_ops_wait_prepare,
+	.wait_finish            = vb2_ops_wait_finish,
+	.start_streaming        = qops_start_streaming,
 	.stop_streaming         = qops_stop_streaming,
 	// clang-format on
 };
