@@ -846,6 +846,12 @@ static int vidioc_enum_frameintervals(struct file *file, void *fh,
 		argp->type = V4L2_FRMIVAL_TYPE_DISCRETE;
 		argp->discrete = dev->capture_param.timeperframe;
 	} else {
+		if (argp->width < V4L2LOOPBACK_SIZE_MIN_WIDTH ||
+		    argp->width > max_width ||
+		    argp->height < V4L2LOOPBACK_SIZE_MIN_HEIGHT ||
+		    argp->height > max_height)
+			return -EINVAL;
+
 		argp->type = V4L2_FRMIVAL_TYPE_CONTINUOUS;
 		argp->stepwise.min.numerator = 1;
 		argp->stepwise.min.denominator = V4L2LOOPBACK_FPS_MAX;
