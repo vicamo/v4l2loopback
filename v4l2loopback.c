@@ -727,30 +727,10 @@ static int vidioc_s_fmt_cap(struct file *file, void *fh,
 static int vidioc_enum_fmt_out(struct file *file, void *fh,
 			       struct v4l2_fmtdesc *f)
 {
-	struct v4l2_loopback_device *dev;
+	if (f->index < 0 || f->index >= ARRAY_SIZE(formats))
+		return -EINVAL;
 
-	dev = file_to_loopdev(file);
-
-	if (dev->ready_for_capture) {
-		const struct v4l2_format_info *fmt;
-
-		/* format has been fixed by the writer, so only one single format is supported */
-		if (f->index)
-			return -EINVAL;
-
-		fmt = backport_v4l2_format_info(dev->pix_format.pixelformat);
-		if (NULL == fmt)
-			return -EINVAL;
-
-		f->pixelformat = fmt->format;
-	} else {
-		/* fill in a dummy format */
-		/* coverity[unsigned_compare] */
-		if (f->index < 0 || f->index >= ARRAY_SIZE(formats))
-			return -EINVAL;
-
-		f->pixelformat = formats[f->index].format;
-	}
+	f->pixelformat = formats[f->index].format;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
 	v4l_fill_fmtdesc(f);
 #endif
@@ -790,41 +770,32 @@ static int vidioc_g_fmt_out(struct file *file, void *fh,
 static int vidioc_try_fmt_out(struct file *file, void *fh,
 			      struct v4l2_format *fmt)
 {
-	struct v4l2_loopback_device *dev;
+	struct v4l2_loopback_device *dev = file_to_loopdev(file);
+	__u32 w = fmt->fmt.pix.width;
+	__u32 h = fmt->fmt.pix.height;
+	__u32 pixfmt = fmt->fmt.pix.pixelformat;
+	const struct v4l2_format_info *format;
 
-	dev = file_to_loopdev(file);
+	w = w ? clamp_val(w, V4L2LOOPBACK_SIZE_MIN_WIDTH, dev->max_width) :
+		      V4L2LOOPBACK_SIZE_DEFAULT_WIDTH;
+	h = h ? clamp_val(h, V4L2LOOPBACK_SIZE_MIN_HEIGHT, dev->max_height) :
+		      V4L2LOOPBACK_SIZE_DEFAULT_HEIGHT;
 
-	/* TODO(vasaka) loopback does not care about formats writer want to set,
-	 * maybe it is a good idea to restrict format somehow */
-	if (dev->ready_for_capture) {
-		fmt->fmt.pix = dev->pix_format;
-	} else {
-		__u32 w = fmt->fmt.pix.width;
-		__u32 h = fmt->fmt.pix.height;
-		__u32 pixfmt = fmt->fmt.pix.pixelformat;
-		const struct v4l2_format_info *format =
-			backport_v4l2_format_info(pixfmt);
+	format = backport_v4l2_format_info(pixfmt);
+	if (NULL == format)
+		format = &formats[0];
 
-		w = w ? clamp_val(w, V4L2LOOPBACK_SIZE_MIN_WIDTH,
-				  dev->max_width) :
-			      V4L2LOOPBACK_SIZE_DEFAULT_WIDTH;
-		h = h ? clamp_val(h, V4L2LOOPBACK_SIZE_MIN_HEIGHT,
-				  dev->max_height) :
-			      V4L2LOOPBACK_SIZE_DEFAULT_HEIGHT;
+	if (v4l2_fill_pixfmt(&fmt->fmt.pix, format->format, w, h))
+		return -EINVAL;
 
-		if (NULL == format)
-			format = &formats[0];
+	fmt->fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
+	if ((fmt->fmt.pix.colorspace == V4L2_COLORSPACE_DEFAULT) ||
+	    (fmt->fmt.pix.colorspace > V4L2_COLORSPACE_DCI_P3))
+		fmt->fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
 
-		if (v4l2_fill_pixfmt(&fmt->fmt.pix, format->format, w, h))
-			return -EINVAL;
+	if (V4L2_FIELD_ANY == fmt->fmt.pix.field)
+		fmt->fmt.pix.field = V4L2_FIELD_NONE;
 
-		if ((fmt->fmt.pix.colorspace == V4L2_COLORSPACE_DEFAULT) ||
-		    (fmt->fmt.pix.colorspace > V4L2_COLORSPACE_DCI_P3))
-			fmt->fmt.pix.colorspace = V4L2_COLORSPACE_SRGB;
-
-		if (V4L2_FIELD_ANY == fmt->fmt.pix.field)
-			fmt->fmt.pix.field = V4L2_FIELD_NONE;
-	}
 	return 0;
 }
 
@@ -998,10 +969,6 @@ static int vidioc_enum_output(struct file *file, void *fh,
 			      struct v4l2_output *outp)
 {
 	__u32 index = outp->index;
-	struct v4l2_loopback_device *dev = file_to_loopdev(file);
-
-	if (!dev->ready_for_output)
-		return -ENOTTY;
 
 	if (0 != index)
 		return -EINVAL;
@@ -1027,9 +994,6 @@ static int vidioc_enum_output(struct file *file, void *fh,
  */
 static int vidioc_g_output(struct file *file, void *fh, unsigned int *i)
 {
-	struct v4l2_loopback_device *dev = file_to_loopdev(file);
-	if (!dev->ready_for_output)
-		return -ENOTTY;
 	if (i)
 		*i = 0;
 	return 0;
@@ -1040,10 +1004,6 @@ static int vidioc_g_output(struct file *file, void *fh, unsigned int *i)
  */
 static int vidioc_s_output(struct file *file, void *fh, unsigned int i)
 {
-	struct v4l2_loopback_device *dev = file_to_loopdev(file);
-	if (!dev->ready_for_output)
-		return -ENOTTY;
-
 	if (i)
 		return -EINVAL;
 
