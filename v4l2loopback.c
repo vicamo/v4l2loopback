@@ -110,11 +110,6 @@ typedef unsigned __poll_t;
 #define MAX_DEVICES 8
 #endif
 
-/* whether the default is to announce capabilities exclusively or not */
-#ifndef V4L2LOOPBACK_DEFAULT_EXCLUSIVECAPS
-#define V4L2LOOPBACK_DEFAULT_EXCLUSIVECAPS 0
-#endif
-
 /* when a producer is considered to have gone stale */
 #ifndef MAX_TIMEOUT
 #define MAX_TIMEOUT (100 * 1000) /* in msecs */
@@ -155,16 +150,6 @@ MODULE_PARM_DESC(output_nr,
 static char *card_label[MAX_DEVICES];
 module_param_array(card_label, charp, NULL, 0000);
 MODULE_PARM_DESC(card_label, "card labels for each device");
-
-static bool exclusive_caps[MAX_DEVICES] = {
-	[0 ...(MAX_DEVICES - 1)] = V4L2LOOPBACK_DEFAULT_EXCLUSIVECAPS
-};
-module_param_array(exclusive_caps, bool, NULL, 0444);
-/* FIXXME: wording */
-MODULE_PARM_DESC(
-	exclusive_caps,
-	"whether to announce OUTPUT/CAPTURE capabilities exclusively or not  [DEFAULT: " __stringify(
-		V4L2LOOPBACK_DEFAULT_EXCLUSIVECAPS) "]");
 
 /* format specifications */
 #define V4L2LOOPBACK_SIZE_MIN_WIDTH 48
@@ -356,9 +341,6 @@ struct v4l2_loopback_device {
 	int ready_for_output; /* set to true when no writer is currently attached
 			       * this differs slightly from !ready_for_capture,
 			       * e.g. when using fallback images */
-	int announce_all_caps; /* set to false, if device caps (OUTPUT/CAPTURE)
-                                * should only be announced if the resp. "ready"
-                                * flag is set; default=TRUE */
 
 	unsigned int max_width;
 	unsigned int max_height;
@@ -596,15 +578,11 @@ static int vidioc_querycap(struct file *file, void *priv,
 	snprintf(cap->bus_info, sizeof(cap->bus_info),
 		 "platform:v4l2loopback-%03d", dev->capture.vdev.num);
 
-	if (dev->announce_all_caps) {
-		capabilities |= V4L2_CAP_VIDEO_CAPTURE | V4L2_CAP_VIDEO_OUTPUT;
-	} else {
-		if (dev->ready_for_capture) {
-			capabilities |= V4L2_CAP_VIDEO_CAPTURE;
-		}
-		if (dev->ready_for_output) {
-			capabilities |= V4L2_CAP_VIDEO_OUTPUT;
-		}
+	if (dev->ready_for_capture) {
+		capabilities |= V4L2_CAP_VIDEO_CAPTURE;
+	}
+	if (dev->ready_for_output) {
+		capabilities |= V4L2_CAP_VIDEO_OUTPUT;
 	}
 
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(4, 7, 0)
@@ -1061,7 +1039,7 @@ static int vidioc_enum_output(struct file *file, void *fh,
 	__u32 index = outp->index;
 	struct v4l2_loopback_device *dev = file_to_loopdev(file);
 
-	if (!dev->announce_all_caps && !dev->ready_for_output)
+	if (!dev->ready_for_output)
 		return -ENOTTY;
 
 	if (0 != index)
@@ -1089,7 +1067,7 @@ static int vidioc_enum_output(struct file *file, void *fh,
 static int vidioc_g_output(struct file *file, void *fh, unsigned int *i)
 {
 	struct v4l2_loopback_device *dev = file_to_loopdev(file);
-	if (!dev->announce_all_caps && !dev->ready_for_output)
+	if (!dev->ready_for_output)
 		return -ENOTTY;
 	if (i)
 		*i = 0;
@@ -1102,7 +1080,7 @@ static int vidioc_g_output(struct file *file, void *fh, unsigned int *i)
 static int vidioc_s_output(struct file *file, void *fh, unsigned int i)
 {
 	struct v4l2_loopback_device *dev = file_to_loopdev(file);
-	if (!dev->announce_all_caps && !dev->ready_for_output)
+	if (!dev->ready_for_output)
 		return -ENOTTY;
 
 	if (i)
@@ -1147,7 +1125,7 @@ static int vidioc_enum_input(struct file *file, void *fh,
 static int vidioc_g_input(struct file *file, void *fh, unsigned int *i)
 {
 	struct v4l2_loopback_device *dev = file_to_loopdev(file);
-	if (!dev->announce_all_caps && !dev->ready_for_capture)
+	if (!dev->ready_for_capture)
 		return -ENOTTY;
 	if (i)
 		*i = 0;
@@ -1160,7 +1138,7 @@ static int vidioc_g_input(struct file *file, void *fh, unsigned int *i)
 static int vidioc_s_input(struct file *file, void *fh, unsigned int i)
 {
 	struct v4l2_loopback_device *dev = file_to_loopdev(file);
-	if (!dev->announce_all_caps && !dev->ready_for_capture)
+	if (!dev->ready_for_capture)
 		return -ENOTTY;
 	if (i == 0)
 		return 0;
@@ -2054,14 +2032,10 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 		max_width, < V4L2LOOPBACK_SIZE_MIN_WIDTH, max_width);
 	u32 _max_height = DEFAULT_FROM_CONF(
 		max_height, < V4L2LOOPBACK_SIZE_MIN_HEIGHT, max_height);
-	bool _announce_all_caps = DEFAULT_FROM_CONF(
-		announce_all_caps, < 0, V4L2LOOPBACK_DEFAULT_EXCLUSIVECAPS);
 
 	u32 _max_buffers = DEFAULT_FROM_CONF(max_buffers, <= 0, max_buffers);
 
 	int output_nr = -1, capture_nr = -1;
-
-	_announce_all_caps = (!!_announce_all_caps);
 
 	if (conf) {
 		if (conf->output_nr >= 0 && conf->capture_nr >= 0 &&
@@ -2108,7 +2082,6 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 	INIT_LIST_HEAD(&dev->outbufs_list);
 	init_waitqueue_head(&dev->read_event);
 
-	dev->announce_all_caps = _announce_all_caps;
 	dev->max_width = _max_width;
 	dev->max_height = _max_height;
 	dev->ready_for_capture = 0;
@@ -2289,7 +2262,6 @@ static long v4l2loopback_control_ioctl(struct file *file, unsigned int cmd,
 		conf.capture_nr = dev->capture.vdev.num;
 		conf.max_width = dev->max_width;
 		conf.max_height = dev->max_height;
-		conf.announce_all_caps = dev->announce_all_caps;
 		conf.max_buffers = dev->buffers_number;
 		conf.debug = dev->capture.vdev.dev_debug;
 
@@ -2500,7 +2472,6 @@ static int v4l2loopback_init_module(void)
 			.capture_nr		= video_nr[i],
 			.max_width		= max_width,
 			.max_height		= max_height,
-			.announce_all_caps	= (!exclusive_caps[i]),
 			.max_buffers		= max_buffers,
 			.debug			= 0,
 			// clang-format on

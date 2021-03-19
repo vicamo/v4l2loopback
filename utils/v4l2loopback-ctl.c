@@ -239,7 +239,6 @@ static void help_add(const char *program, int brief, int argc, char **argv)
 		"\n\t -n <name>           : pretty name for the device"
 		"\n\t -w <max_width>      : maximum allowed frame width"
 		"\n\t -h <max_height>     : maximum allowed frame height"
-		"\n\t -x <exclusive_caps> : whether to announce OUTPUT/CAPTURE capabilities exclusively"
 		"\n\t -b <buffers>        : buffers to queue"
 		"\n\t -v                  : verbose mode (print properties of device after successfully creating it)"
 		"\n"
@@ -441,26 +440,24 @@ static void print_conf(struct v4l2_loopback_config *cfg)
 	       "\n\tcard_label       : %s"
 	       "\n\tmax_width        : %d"
 	       "\n\tmax_height       : %d"
-	       "\n\tannounce_all_caps: %d"
 	       "\n\tmax_buffers      : %d"
 	       "\n\tdebug            : 0x%x"
 	       "\n",
 	       cfg->capture_nr, cfg->output_nr, cfg->card_label, cfg->max_width,
-	       cfg->max_height, cfg->announce_all_caps, cfg->max_buffers,
-	       cfg->debug);
+	       cfg->max_height, cfg->max_buffers, cfg->debug);
 	MARK();
 }
 
-static struct v4l2_loopback_config *
-make_conf(struct v4l2_loopback_config *cfg, const char *label, int max_width,
-	  int max_height, int exclusive_caps, int buffers, int openers,
-	  int capture_device, int output_device)
+static struct v4l2_loopback_config *make_conf(struct v4l2_loopback_config *cfg,
+					      const char *label, int max_width,
+					      int max_height, int buffers,
+					      int openers, int capture_device,
+					      int output_device)
 {
 	if (!cfg)
 		return 0;
-	if (!label && max_width <= 0 && max_height <= 0 && exclusive_caps < 0 &&
-	    buffers <= 0 && openers <= 0 && capture_device < 0 &&
-	    output_device < 0)
+	if (!label && max_width <= 0 && max_height <= 0 && buffers <= 0 &&
+	    openers <= 0 && capture_device < 0 && output_device < 0)
 		return 0;
 	cfg->capture_nr = capture_device;
 	cfg->output_nr = output_device;
@@ -469,7 +466,6 @@ make_conf(struct v4l2_loopback_config *cfg, const char *label, int max_width,
 		snprintf(cfg->card_label, 32, "%s", label);
 	cfg->max_height = max_height;
 	cfg->max_width = max_width;
-	cfg->announce_all_caps = (exclusive_caps < 0) ? -1 : !exclusive_caps;
 	cfg->max_buffers = buffers;
 	cfg->debug = 0;
 	return cfg;
@@ -975,7 +971,6 @@ int main(int argc, char **argv)
 	char *label = 0;
 	int max_width = -1;
 	int max_height = -1;
-	int exclusive_caps = -1;
 	int buffers = -1;
 	int openers = -1;
 
@@ -1009,10 +1004,6 @@ int main(int argc, char **argv)
 			case 'h':
 				max_height = my_atoi("max_height", optarg);
 				break;
-			case 'x':
-				exclusive_caps =
-					my_atoi("exclusive_caps", optarg);
-				break;
 			case 'b':
 				buffers = my_atoi("buffers", optarg);
 				break;
@@ -1042,9 +1033,8 @@ int main(int argc, char **argv)
 			}
 			ret = add_device(fd,
 					 make_conf(&cfg, label, max_width,
-						   max_height, exclusive_caps,
-						   buffers, openers, capture_nr,
-						   output_nr),
+						   max_height, buffers, openers,
+						   capture_nr, output_nr),
 					 verbose);
 		} while (0);
 		break;
