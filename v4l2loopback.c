@@ -1506,278 +1506,6 @@ static int vidioc_subscribe_event(struct v4l2_fh *fh,
 	return -EINVAL;
 }
 
-static int v4l2_loopback_mmap(struct file *file, struct vm_area_struct *vma)
-{
-	u8 *addr;
-	unsigned long start;
-	unsigned long size;
-	struct v4l2_loopback_device *dev;
-	struct v4l2_loopback_opener *opener;
-	struct v4l2l_buffer *buffer = NULL;
-
-	start = (unsigned long)vma->vm_start;
-	size = (unsigned long)(vma->vm_end - vma->vm_start);
-
-	dev = file_to_loopdev(file);
-	opener = fh_to_opener(file->private_data);
-
-	if (size > dev->buffer_size) {
-		dprintk("userspace tries to mmap too much, fail\n");
-		return -EINVAL;
-	}
-	if (opener->timeout_image_io) {
-		/* we are going to map the timeout_image_buffer */
-		if ((vma->vm_pgoff << PAGE_SHIFT) !=
-		    dev->buffer_size * MAX_BUFFERS) {
-			dprintk("invalid mmap offset for timeout_image_io mode\n");
-			return -EINVAL;
-		}
-	} else if ((vma->vm_pgoff << PAGE_SHIFT) >
-		   dev->buffer_size * (dev->buffers_number - 1)) {
-		dprintk("userspace tries to mmap too far, fail\n");
-		return -EINVAL;
-	}
-
-	/* FIXXXXXME: allocation should not happen here! */
-	if (NULL == dev->image)
-		if (allocate_buffers(dev) < 0)
-			return -EINVAL;
-
-	if (opener->timeout_image_io) {
-		buffer = &dev->timeout_image_buffer;
-		addr = dev->timeout_image;
-	} else {
-		int i;
-		for (i = 0; i < dev->buffers_number; ++i) {
-			buffer = &dev->buffers[i];
-			if ((buffer->buffer.m.offset >> PAGE_SHIFT) ==
-			    vma->vm_pgoff)
-				break;
-		}
-
-		if (i >= dev->buffers_number)
-			return -EINVAL;
-
-		addr = dev->image + (vma->vm_pgoff << PAGE_SHIFT);
-	}
-
-	while (size > 0) {
-		struct page *page;
-
-		page = vmalloc_to_page(addr);
-
-		if (vm_insert_page(vma, start, page) < 0)
-			return -EAGAIN;
-
-		start += PAGE_SIZE;
-		addr += PAGE_SIZE;
-		size -= PAGE_SIZE;
-	}
-
-	vma->vm_private_data = buffer;
-	buffer->buffer.flags |= V4L2_BUF_FLAG_MAPPED;
-
-	return 0;
-}
-
-static unsigned int v4l2_loopback_poll(struct file *file,
-				       struct poll_table_struct *pts)
-{
-	struct v4l2_loopback_opener *opener;
-	struct v4l2_loopback_device *dev;
-	__poll_t req_events = poll_requested_events(pts);
-	int ret_mask = 0;
-
-	opener = fh_to_opener(file->private_data);
-	dev = file_to_loopdev(file);
-
-	if (req_events & POLLPRI) {
-		if (!v4l2_event_pending(&opener->fh))
-			poll_wait(file, &opener->fh.wait, pts);
-		if (v4l2_event_pending(&opener->fh)) {
-			ret_mask |= POLLPRI;
-			if (!(req_events & DEFAULT_POLLMASK))
-				return ret_mask;
-		}
-	}
-
-	switch (opener->type) {
-	case WRITER:
-		ret_mask |= POLLOUT | POLLWRNORM;
-		break;
-	case READER:
-		if (!can_read(dev, opener)) {
-			if (ret_mask)
-				return ret_mask;
-			poll_wait(file, &dev->read_event, pts);
-		}
-		if (can_read(dev, opener))
-			ret_mask |= POLLIN | POLLRDNORM;
-		if (v4l2_event_pending(&opener->fh))
-			ret_mask |= POLLPRI;
-		break;
-	default:
-		break;
-	}
-
-	return ret_mask;
-}
-
-/* do not want to limit device opens, it can be as many readers as user want,
- * writers are limited by means of setting writer field */
-static int v4l2_loopback_open(struct file *file)
-{
-	struct v4l2_loopback_device *dev;
-	struct v4l2_loopback_opener *opener;
-
-	dev = file_to_loopdev(file);
-	/* kfree on close */
-	opener = kzalloc(sizeof(*opener), GFP_KERNEL);
-	if (opener == NULL)
-		return -ENOMEM;
-
-	atomic_inc(&dev->open_count);
-
-	opener->timeout_image_io = dev->timeout_image_io;
-	if (opener->timeout_image_io) {
-		int r = allocate_timeout_image(dev);
-
-		if (r < 0) {
-			dprintk("timeout image allocation failed\n");
-
-			atomic_dec(&dev->open_count);
-
-			kfree(opener);
-			return r;
-		}
-	}
-
-	dev->timeout_image_io = 0;
-
-	v4l2_fh_init(&opener->fh, video_devdata(file));
-	file->private_data = &opener->fh;
-
-	v4l2_fh_add(&opener->fh);
-	dprintk("opened dev:%p with image:%p\n", dev, dev ? dev->image : NULL);
-	return 0;
-}
-
-static int v4l2_loopback_close(struct file *file)
-{
-	struct v4l2_loopback_opener *opener;
-	struct v4l2_loopback_device *dev;
-	int iswriter = 0;
-
-	opener = fh_to_opener(file->private_data);
-	dev = file_to_loopdev(file);
-
-	if (WRITER == opener->type)
-		iswriter = 1;
-
-	atomic_dec(&dev->open_count);
-	if (dev->open_count.counter == 0) {
-		del_timer_sync(&dev->sustain_timer);
-		del_timer_sync(&dev->timeout_timer);
-	}
-	try_free_buffers(dev);
-
-	v4l2_fh_del(&opener->fh);
-	v4l2_fh_exit(&opener->fh);
-
-	kfree(opener);
-	if (iswriter) {
-		dev->ready_for_output = 1;
-	}
-	return 0;
-}
-
-static ssize_t v4l2_loopback_read(struct file *file, char __user *buf,
-				  size_t count, loff_t *ppos)
-{
-	int read_index;
-	struct v4l2_loopback_device *dev;
-	struct v4l2_buffer *b;
-
-	dev = file_to_loopdev(file);
-
-	read_index = get_capture_buffer(file);
-	if (read_index < 0)
-		return read_index;
-	if (count > dev->buffer_size)
-		count = dev->buffer_size;
-	b = &dev->buffers[read_index].buffer;
-	if (count > b->bytesused)
-		count = b->bytesused;
-	if (copy_to_user((void *)buf, (void *)(dev->image + b->m.offset),
-			 count)) {
-		printk(KERN_ERR
-		       "v4l2-loopback: failed copy_to_user() in read buf\n");
-		return -EFAULT;
-	}
-
-	return count;
-}
-
-static ssize_t v4l2_loopback_write(struct file *file, const char __user *buf,
-				   size_t count, loff_t *ppos)
-{
-	struct v4l2_loopback_opener *opener;
-	struct v4l2_loopback_device *dev;
-	int write_index;
-	struct v4l2_buffer *b;
-	int err = 0;
-
-	MARK();
-
-	dev = file_to_loopdev(file);
-	opener = fh_to_opener(file->private_data);
-
-	if (UNNEGOTIATED == opener->type) {
-		spin_lock(&dev->lock);
-
-		if (dev->ready_for_output) {
-			err = vidioc_streamon(file, file->private_data,
-					      V4L2_BUF_TYPE_VIDEO_OUTPUT);
-		}
-
-		spin_unlock(&dev->lock);
-
-		if (err < 0)
-			return err;
-	}
-
-	if (WRITER != opener->type)
-		return -EINVAL;
-
-	if (!dev->ready_for_capture) {
-		int ret = allocate_buffers(dev);
-		if (ret < 0)
-			return ret;
-		dev->ready_for_capture = 1;
-	}
-
-	if (count > dev->buffer_size)
-		count = dev->buffer_size;
-
-	write_index = dev->write_position % dev->used_buffers;
-	b = &dev->buffers[write_index].buffer;
-
-	if (copy_from_user((void *)(dev->image + b->m.offset), (void *)buf,
-			   count)) {
-		printk(KERN_ERR
-		       "v4l2-loopback: failed copy_from_user() in write buf, could not write %zu\n",
-		       count);
-		return -EFAULT;
-	}
-	v4l2l_get_timestamp(b);
-	b->bytesused = count;
-	b->sequence = dev->write_position;
-	buffer_written(dev, &dev->buffers[write_index]);
-	wake_up_all(&dev->read_event);
-
-	return count;
-}
-
 /* init functions */
 /* frees buffers, if already allocated */
 static void free_buffers(struct v4l2_loopback_device *dev)
@@ -2191,7 +1919,7 @@ static void v4l2_loopback_remove_entity(struct v4l2_loopback_entity *entity)
 	struct video_device *vdev = &entity->vdev;
 
 	v4l2loopback_remove_sysfs(vdev);
-	video_unregister_device(vdev);
+	vb2_video_unregister_device(vdev);
 	video_device_release_empty(vdev);
 }
 
@@ -2331,12 +2059,11 @@ static struct miscdevice v4l2loopback_misc = {
 static const struct v4l2_file_operations fops_out = {
 	// clang-format off
 	.owner		= THIS_MODULE,
-	.open		= v4l2_loopback_open,
-	.release	= v4l2_loopback_close,
-	.read		= v4l2_loopback_read,
-	.write		= v4l2_loopback_write,
-	.poll		= v4l2_loopback_poll,
-	.mmap		= v4l2_loopback_mmap,
+	.open		= v4l2_fh_open,
+	.release	= vb2_fop_release,
+	.write		= vb2_fop_write,
+	.poll		= vb2_fop_poll,
+	.mmap		= vb2_fop_mmap,
 	.unlocked_ioctl	= video_ioctl2,
 	// clang-format on
 };
@@ -2383,12 +2110,11 @@ static const struct vb2_ops qops_out = {};
 static const struct v4l2_file_operations fops_cap = {
 	// clang-format off
 	.owner		= THIS_MODULE,
-	.open		= v4l2_loopback_open,
-	.release	= v4l2_loopback_close,
-	.read		= v4l2_loopback_read,
-	.write		= v4l2_loopback_write,
-	.poll		= v4l2_loopback_poll,
-	.mmap		= v4l2_loopback_mmap,
+	.open		= v4l2_fh_open,
+	.release	= vb2_fop_release,
+	.read		= vb2_fop_read,
+	.poll		= vb2_fop_poll,
+	.mmap		= vb2_fop_mmap,
 	.unlocked_ioctl	= video_ioctl2,
 	// clang-format on
 };
