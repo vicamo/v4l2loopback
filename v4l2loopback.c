@@ -2181,6 +2181,17 @@ static void v4l2_loopback_remove(struct v4l2_loopback_device *dev)
 	kfree(dev);
 }
 
+static void fill_config_with_dev(struct v4l2_loopback_config *conf,
+				 struct v4l2_loopback_device *dev)
+{
+	conf->output_nr = dev->output.vdev.num;
+	conf->capture_nr = dev->capture.vdev.num;
+	conf->max_width = dev->max_width;
+	conf->max_height = dev->max_height;
+	conf->max_buffers = dev->buffers_number;
+	conf->debug = dev->capture.vdev.dev_debug;
+}
+
 static long v4l2loopback_control_ioctl(struct file *file, unsigned int cmd,
 				       unsigned long parm)
 {
@@ -2209,8 +2220,12 @@ static long v4l2loopback_control_ioctl(struct file *file, unsigned int cmd,
 		dev = v4l2_loopback_add(confptr);
 		if (IS_ERR(dev))
 			ret = PTR_ERR(dev);
-		else
-			ret = dev->capture.vdev.num;
+		else {
+			ret = 0;
+			fill_config_with_dev(&conf, dev);
+			if (copy_to_user((void *)parm, &conf, sizeof(conf)))
+				ret = -EFAULT;
+		}
 		break;
 		/* remove a v4l2loopback device (both capture and output) */
 	case V4L2LOOPBACK_CTL_REMOVE:
@@ -2252,22 +2267,14 @@ static long v4l2loopback_control_ioctl(struct file *file, unsigned int cmd,
 		if (output_dev && capture_dev && output_dev != capture_dev)
 			break;
 
+		ret = 0;
+
 		/* v4l2_loopback_config identified a single device, so fetch the data */
 		snprintf(conf.card_label, sizeof(conf.card_label), "%s",
 			 dev->card_label);
-		conf.output_nr = dev->output.vdev.num;
-		conf.capture_nr = dev->capture.vdev.num;
-		conf.max_width = dev->max_width;
-		conf.max_height = dev->max_height;
-		conf.max_buffers = dev->buffers_number;
-		conf.debug = dev->capture.vdev.dev_debug;
-
-		if (copy_to_user((void *)parm, &conf, sizeof(conf))) {
+		fill_config_with_dev(&conf, dev);
+		if (copy_to_user((void *)parm, &conf, sizeof(conf)))
 			ret = -EFAULT;
-			break;
-		}
-
-		ret = 0;
 		break;
 	}
 

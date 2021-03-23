@@ -61,8 +61,8 @@ struct v4l2_loopback_config {
  * to-be-created device set.
  * if the ptr is NULL, a new device is created with default values at the driver's discretion.
  *
- * returns the device_nr of the OUTPUT device (which can be used with V4L2LOOPBACK_CTL_QUERY,
- * to get more information on the device)
+ * At output, the (struct v4l2_loopback_config) passed in is updated with the
+ * actual parameters used for device creation and the return value is 0.
  */
 #define V4L2LOOPBACK_CTL_ADD 0x4C80
 

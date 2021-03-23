@@ -482,20 +482,10 @@ static int add_device(int fd, struct v4l2_loopback_config *cfg, int verbose)
 	}
 	MARK();
 
-	printf("/dev/video%d\n", ret);
+	printf("/dev/video%d\n", cfg->capture_nr);
+	if (verbose > 0)
+		print_conf(cfg);
 
-	if (verbose > 0) {
-		MARK();
-		struct v4l2_loopback_config config;
-		memset(&config, 0, sizeof(config));
-		config.output_nr = config.capture_nr = ret;
-		ret = ioctl(fd, V4L2LOOPBACK_CTL_QUERY, &config);
-		if (!ret)
-			perror("failed querying newly added device");
-		MARK();
-		print_conf(&config);
-		MARK();
-	}
 	return (!ret);
 }
 
