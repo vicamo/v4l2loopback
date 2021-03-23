@@ -357,30 +357,6 @@ struct v4l2_loopback_device {
 #define cd_to_loopdev(dev) video_get_drvdata(to_video_device((dev)))
 #define file_to_loopdev(file) video_get_drvdata(video_devdata((file)))
 
-/* types of opener shows what opener wants to do with loopback */
-enum opener_type {
-	// clang-format off
-	UNNEGOTIATED	= 0,
-	READER		= 1,
-	WRITER		= 2,
-	// clang-format on
-};
-
-/* struct keeping state and type of opener */
-struct v4l2_loopback_opener {
-	enum opener_type type;
-	int read_position; /* number of last processed frame + 1 or
-			    * write_position - 1 if reader went out of sync */
-	unsigned int reread_count;
-	struct v4l2_buffer *buffers;
-	unsigned int buffers_number; /* should not be big, 4 is a good choice */
-	int timeout_image_io;
-
-	struct v4l2_fh fh;
-};
-
-#define fh_to_opener(ptr) container_of((ptr), struct v4l2_loopback_opener, fh)
-
 #include "v4l2loopback_formats.h"
 
 static char *fourcc2str(unsigned int fourcc, char buf[4])
@@ -547,26 +523,6 @@ static const struct vb2_ops qops_out;
 static const struct v4l2_file_operations fops_cap;
 static const struct v4l2_ioctl_ops ioctl_ops_cap;
 static const struct vb2_ops qops_cap;
-
-/* Queue helpers */
-/* next functions sets buffer flags and adjusts counters accordingly */
-static inline void set_done(struct v4l2l_buffer *buffer)
-{
-	buffer->buffer.flags &= ~V4L2_BUF_FLAG_QUEUED;
-	buffer->buffer.flags |= V4L2_BUF_FLAG_DONE;
-}
-
-static inline void set_queued(struct v4l2l_buffer *buffer)
-{
-	buffer->buffer.flags &= ~V4L2_BUF_FLAG_DONE;
-	buffer->buffer.flags |= V4L2_BUF_FLAG_QUEUED;
-}
-
-static inline void unset_flags(struct v4l2l_buffer *buffer)
-{
-	buffer->buffer.flags &= ~V4L2_BUF_FLAG_QUEUED;
-	buffer->buffer.flags &= ~V4L2_BUF_FLAG_DONE;
-}
 
 /* V4L2 ioctl caps and params calls */
 /* returns device capabilities
@@ -1147,351 +1103,6 @@ static int vidioc_s_input(struct file *file, void *fh, unsigned int i)
 		return -ENOTTY;
 	if (i == 0)
 		return 0;
-	return -EINVAL;
-}
-
-/* --------------- V4L2 ioctl buffer related calls ----------------- */
-
-/* negotiate buffer type
- * only mmap streaming supported
- * called on VIDIOC_REQBUFS
- */
-static int vidioc_reqbufs(struct file *file, void *fh,
-			  struct v4l2_requestbuffers *b)
-{
-	struct v4l2_loopback_device *dev;
-	struct v4l2_loopback_opener *opener;
-	unsigned int i;
-
-	dev = file_to_loopdev(file);
-	opener = fh_to_opener(fh);
-
-	if (opener->timeout_image_io) {
-		if (b->memory != V4L2_MEMORY_MMAP)
-			return -EINVAL;
-		b->count = 1;
-		return 0;
-	}
-
-	init_buffers(dev);
-	switch (b->memory) {
-	case V4L2_MEMORY_MMAP:
-		/* do nothing here, buffers are always allocated */
-		if (b->count < 1 || !dev->buffers_number)
-			return 0;
-
-		if (b->count > dev->buffers_number)
-			b->count = dev->buffers_number;
-
-		/* make sure that outbufs_list contains buffers from 0 to used_buffers-1
-		 * actually, it will have been already populated via v4l2_loopback_init()
-		 * at this point */
-		if (list_empty(&dev->outbufs_list)) {
-			for (i = 0; i < dev->used_buffers; ++i)
-				list_add_tail(&dev->buffers[i].list_head,
-					      &dev->outbufs_list);
-		}
-
-		/* also, if dev->used_buffers is going to be decreased, we should remove
-		 * out-of-range buffers from outbufs_list, and fix bufpos2index mapping */
-		if (b->count < dev->used_buffers) {
-			struct v4l2l_buffer *pos, *n;
-
-			list_for_each_entry_safe (pos, n, &dev->outbufs_list,
-						  list_head) {
-				if (pos->buffer.index >= b->count)
-					list_del(&pos->list_head);
-			}
-
-			/* after we update dev->used_buffers, buffers in outbufs_list will
-			 * correspond to dev->write_position + [0;b->count-1] range */
-			i = dev->write_position;
-			list_for_each_entry (pos, &dev->outbufs_list,
-					     list_head) {
-				dev->bufpos2index[i % b->count] =
-					pos->buffer.index;
-				++i;
-			}
-		}
-
-		opener->buffers_number = b->count;
-		if (opener->buffers_number < dev->used_buffers)
-			dev->used_buffers = opener->buffers_number;
-		return 0;
-	default:
-		return -EINVAL;
-	}
-}
-
-/* returns buffer asked for;
- * give app as many buffers as it wants, if it less than MAX,
- * but map them in our inner buffers
- * called on VIDIOC_QUERYBUF
- */
-static int vidioc_querybuf(struct file *file, void *fh, struct v4l2_buffer *b)
-{
-	enum v4l2_buf_type type;
-	int index;
-	struct v4l2_loopback_device *dev;
-	struct v4l2_loopback_opener *opener;
-
-	type = b->type;
-	index = b->index;
-	dev = file_to_loopdev(file);
-	opener = fh_to_opener(fh);
-
-	if ((b->type != V4L2_BUF_TYPE_VIDEO_CAPTURE) &&
-	    (b->type != V4L2_BUF_TYPE_VIDEO_OUTPUT)) {
-		return -EINVAL;
-	}
-	if (b->index > max_buffers)
-		return -EINVAL;
-
-	if (opener->timeout_image_io)
-		*b = dev->timeout_image_buffer.buffer;
-	else
-		*b = dev->buffers[b->index % dev->used_buffers].buffer;
-
-	b->type = type;
-	b->index = index;
-
-	/*  Hopefully fix 'DQBUF return bad index if queue bigger then 2 for capture'
-            https://github.com/umlaeute/v4l2loopback/issues/60 */
-	b->flags &= ~V4L2_BUF_FLAG_DONE;
-	b->flags |= V4L2_BUF_FLAG_QUEUED;
-
-	return 0;
-}
-
-static void buffer_written(struct v4l2_loopback_device *dev,
-			   struct v4l2l_buffer *buf)
-{
-	del_timer_sync(&dev->sustain_timer);
-	del_timer_sync(&dev->timeout_timer);
-	spin_lock_bh(&dev->lock);
-
-	dev->bufpos2index[dev->write_position % dev->used_buffers] =
-		buf->buffer.index;
-	list_move_tail(&buf->list_head, &dev->outbufs_list);
-	++dev->write_position;
-	dev->reread_count = 0;
-
-	check_timers(dev);
-	spin_unlock_bh(&dev->lock);
-}
-
-/* put buffer to queue
- * called on VIDIOC_QBUF
- */
-static int vidioc_qbuf(struct file *file, void *fh, struct v4l2_buffer *buf)
-{
-	struct v4l2_loopback_device *dev;
-	struct v4l2_loopback_opener *opener;
-	struct v4l2l_buffer *b;
-	unsigned int index;
-
-	dev = file_to_loopdev(file);
-	opener = fh_to_opener(fh);
-
-	if (buf->index > max_buffers)
-		return -EINVAL;
-	if (opener->timeout_image_io)
-		return 0;
-
-	index = buf->index % dev->used_buffers;
-	b = &dev->buffers[index];
-
-	switch (buf->type) {
-	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
-		dprintkrw("capture QBUF index: %u\n", index);
-		set_queued(b);
-		return 0;
-	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
-		dprintkrw("output QBUF pos: %u index: %u\n",
-			  dev->write_position, index);
-		if (buf->timestamp.tv_sec == 0 && buf->timestamp.tv_usec == 0)
-			v4l2l_get_timestamp(&b->buffer);
-		else
-			b->buffer.timestamp = buf->timestamp;
-		b->buffer.bytesused = buf->bytesused;
-		b->buffer.sequence = dev->write_position;
-		set_done(b);
-		buffer_written(dev, b);
-
-		/*  Hopefully fix 'DQBUF return bad index if queue bigger then 2 for capture'
-                    https://github.com/umlaeute/v4l2loopback/issues/60 */
-		buf->flags &= ~V4L2_BUF_FLAG_DONE;
-		buf->flags |= V4L2_BUF_FLAG_QUEUED;
-
-		wake_up_all(&dev->read_event);
-		return 0;
-	default:
-		return -EINVAL;
-	}
-}
-
-static int can_read(struct v4l2_loopback_device *dev,
-		    struct v4l2_loopback_opener *opener)
-{
-	int ret;
-
-	spin_lock_bh(&dev->lock);
-	check_timers(dev);
-	ret = dev->write_position > opener->read_position ||
-	      dev->reread_count > opener->reread_count || dev->timeout_happened;
-	spin_unlock_bh(&dev->lock);
-	return ret;
-}
-
-static int get_capture_buffer(struct file *file)
-{
-	struct v4l2_loopback_device *dev = file_to_loopdev(file);
-	struct v4l2_loopback_opener *opener = fh_to_opener(file->private_data);
-	int pos, ret;
-	int timeout_happened;
-
-	if ((file->f_flags & O_NONBLOCK) &&
-	    (dev->write_position <= opener->read_position &&
-	     dev->reread_count <= opener->reread_count &&
-	     !dev->timeout_happened))
-		return -EAGAIN;
-	wait_event_interruptible(dev->read_event, can_read(dev, opener));
-
-	spin_lock_bh(&dev->lock);
-	if (dev->write_position == opener->read_position) {
-		if (dev->reread_count > opener->reread_count + 2)
-			opener->reread_count = dev->reread_count - 1;
-		++opener->reread_count;
-		pos = (opener->read_position + dev->used_buffers - 1) %
-		      dev->used_buffers;
-	} else {
-		opener->reread_count = 0;
-		if (dev->write_position >
-		    opener->read_position + dev->used_buffers)
-			opener->read_position = dev->write_position - 1;
-		pos = opener->read_position % dev->used_buffers;
-		++opener->read_position;
-	}
-	timeout_happened = dev->timeout_happened;
-	dev->timeout_happened = 0;
-	spin_unlock_bh(&dev->lock);
-
-	ret = dev->bufpos2index[pos];
-	if (timeout_happened) {
-		if (ret < 0) {
-			dprintk("trying to return not mapped buf[%d]\n", ret);
-			return -EFAULT;
-		}
-		/* although allocated on-demand, timeout_image is freed only
-		 * in free_buffers(), so we don't need to worry about it being
-		 * deallocated suddenly */
-		memcpy(dev->image + dev->buffers[ret].buffer.m.offset,
-		       dev->timeout_image, dev->buffer_size);
-	}
-	return ret;
-}
-
-/* put buffer to dequeue
- * called on VIDIOC_DQBUF
- */
-static int vidioc_dqbuf(struct file *file, void *fh, struct v4l2_buffer *buf)
-{
-	struct v4l2_loopback_device *dev;
-	struct v4l2_loopback_opener *opener;
-	int index;
-	struct v4l2l_buffer *b;
-
-	dev = file_to_loopdev(file);
-	opener = fh_to_opener(fh);
-	if (opener->timeout_image_io) {
-		*buf = dev->timeout_image_buffer.buffer;
-		return 0;
-	}
-
-	switch (buf->type) {
-	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
-		index = get_capture_buffer(file);
-		if (index < 0)
-			return index;
-		dprintkrw("capture DQBUF pos: %u index: %d\n",
-			  opener->read_position - 1, index);
-		if (!(dev->buffers[index].buffer.flags &
-		      V4L2_BUF_FLAG_MAPPED)) {
-			dprintk("trying to return not mapped buf[%d]\n", index);
-			return -EINVAL;
-		}
-		unset_flags(&dev->buffers[index]);
-		*buf = dev->buffers[index].buffer;
-		return 0;
-	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
-		b = list_entry(dev->outbufs_list.prev, struct v4l2l_buffer,
-			       list_head);
-		list_move_tail(&b->list_head, &dev->outbufs_list);
-		dprintkrw("output DQBUF index: %u\n", b->buffer.index);
-		unset_flags(b);
-		*buf = b->buffer;
-		buf->type = V4L2_BUF_TYPE_VIDEO_OUTPUT;
-		return 0;
-	default:
-		return -EINVAL;
-	}
-}
-
-/* ------------- STREAMING ------------------- */
-
-/* start streaming
- * called on VIDIOC_STREAMON
- */
-static int vidioc_streamon(struct file *file, void *fh, enum v4l2_buf_type type)
-{
-	struct v4l2_loopback_device *dev;
-	struct v4l2_loopback_opener *opener;
-
-	dev = file_to_loopdev(file);
-	opener = fh_to_opener(fh);
-
-	switch (type) {
-	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
-		if (!dev->ready_for_capture) {
-			int ret = allocate_buffers(dev);
-			if (ret < 0)
-				return ret;
-		}
-		opener->type = WRITER;
-		dev->ready_for_output = 0;
-		dev->ready_for_capture++;
-		return 0;
-	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
-		if (!dev->ready_for_capture)
-			return -EIO;
-		opener->type = READER;
-		return 0;
-	default:
-		return -EINVAL;
-	}
-	return -EINVAL;
-}
-
-/* stop streaming
- * called on VIDIOC_STREAMOFF
- */
-static int vidioc_streamoff(struct file *file, void *fh,
-			    enum v4l2_buf_type type)
-{
-	struct v4l2_loopback_device *dev;
-
-	dev = file_to_loopdev(file);
-
-	switch (type) {
-	case V4L2_BUF_TYPE_VIDEO_OUTPUT:
-		if (dev->ready_for_capture > 0)
-			dev->ready_for_capture--;
-		return 0;
-	case V4L2_BUF_TYPE_VIDEO_CAPTURE:
-		return 0;
-	default:
-		return -EINVAL;
-	}
 	return -EINVAL;
 }
 
@@ -2092,13 +1703,15 @@ static const struct v4l2_ioctl_ops ioctl_ops_out = {
 	.vidioc_g_parm			= vidioc_g_parm,
 	.vidioc_s_parm			= vidioc_s_parm,
 
-	.vidioc_reqbufs			= vidioc_reqbufs,
-	.vidioc_querybuf		= vidioc_querybuf,
-	.vidioc_qbuf			= vidioc_qbuf,
-	.vidioc_dqbuf			= vidioc_dqbuf,
-
-	.vidioc_streamon		= vidioc_streamon,
-	.vidioc_streamoff		= vidioc_streamoff,
+	.vidioc_reqbufs			= vb2_ioctl_reqbufs,
+	.vidioc_create_bufs		= vb2_ioctl_create_bufs,
+	.vidioc_prepare_buf		= vb2_ioctl_prepare_buf,
+	.vidioc_querybuf		= vb2_ioctl_querybuf,
+	.vidioc_qbuf			= vb2_ioctl_qbuf,
+	.vidioc_dqbuf			= vb2_ioctl_dqbuf,
+	.vidioc_streamon		= vb2_ioctl_streamon,
+	.vidioc_streamoff		= vb2_ioctl_streamoff,
+	.vidioc_expbuf			= vb2_ioctl_expbuf,
 
 	.vidioc_subscribe_event		= vidioc_subscribe_event,
 	.vidioc_unsubscribe_event	= v4l2_event_unsubscribe,
@@ -2143,13 +1756,15 @@ static const struct v4l2_ioctl_ops ioctl_ops_cap = {
 	.vidioc_g_parm			= vidioc_g_parm,
 	.vidioc_s_parm			= vidioc_s_parm,
 
-	.vidioc_reqbufs			= vidioc_reqbufs,
-	.vidioc_querybuf		= vidioc_querybuf,
-	.vidioc_qbuf			= vidioc_qbuf,
-	.vidioc_dqbuf			= vidioc_dqbuf,
-
-	.vidioc_streamon		= vidioc_streamon,
-	.vidioc_streamoff		= vidioc_streamoff,
+	.vidioc_reqbufs			= vb2_ioctl_reqbufs,
+	.vidioc_create_bufs		= vb2_ioctl_create_bufs,
+	.vidioc_prepare_buf		= vb2_ioctl_prepare_buf,
+	.vidioc_querybuf		= vb2_ioctl_querybuf,
+	.vidioc_qbuf			= vb2_ioctl_qbuf,
+	.vidioc_dqbuf			= vb2_ioctl_dqbuf,
+	.vidioc_streamon		= vb2_ioctl_streamon,
+	.vidioc_streamoff		= vb2_ioctl_streamoff,
+	.vidioc_expbuf			= vb2_ioctl_expbuf,
 
 	.vidioc_subscribe_event		= vidioc_subscribe_event,
 	.vidioc_unsubscribe_event	= v4l2_event_unsubscribe,
