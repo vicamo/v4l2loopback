@@ -264,7 +264,6 @@ struct v4l2loopback_private {
 struct v4l2l_buffer {
 	struct v4l2_buffer buffer;
 	struct list_head list_head;
-	int use_count;
 };
 
 struct v4l2_loopback_device {
@@ -1507,28 +1506,6 @@ static int vidioc_subscribe_event(struct v4l2_fh *fh,
 	return -EINVAL;
 }
 
-/* file operations */
-static void vm_open(struct vm_area_struct *vma)
-{
-	struct v4l2l_buffer *buf;
-
-	buf = vma->vm_private_data;
-	buf->use_count++;
-}
-
-static void vm_close(struct vm_area_struct *vma)
-{
-	struct v4l2l_buffer *buf;
-
-	buf = vma->vm_private_data;
-	buf->use_count--;
-}
-
-static struct vm_operations_struct vm_ops = {
-	.open = vm_open,
-	.close = vm_close,
-};
-
 static int v4l2_loopback_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	u8 *addr;
@@ -1597,11 +1574,8 @@ static int v4l2_loopback_mmap(struct file *file, struct vm_area_struct *vma)
 		size -= PAGE_SIZE;
 	}
 
-	vma->vm_ops = &vm_ops;
 	vma->vm_private_data = buffer;
 	buffer->buffer.flags |= V4L2_BUF_FLAG_MAPPED;
-
-	vm_open(vma);
 
 	return 0;
 }
