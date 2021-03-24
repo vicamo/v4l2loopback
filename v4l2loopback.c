@@ -746,18 +746,13 @@ static int vidioc_enum_fmt_cap(struct file *file, void *fh,
 	if (f->index)
 		return -EINVAL;
 	if (dev->ready_for_capture) {
-		const __u32 format = dev->pix_format.pixelformat;
-
-		snprintf(f->description, sizeof(f->description), "[%c%c%c%c]",
-			 (format >> 0) & 0xFF, (format >> 8) & 0xFF,
-			 (format >> 16) & 0xFF, (format >> 24) & 0xFF);
-
 		f->pixelformat = dev->pix_format.pixelformat;
 	} else {
 		return -EINVAL;
 	}
-	f->flags = 0;
-
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
+	v4l_fill_fmtdesc(f);
+#endif
 	return 0;
 }
 
@@ -841,10 +836,6 @@ static int vidioc_enum_fmt_out(struct file *file, void *fh,
 		if (NULL == fmt)
 			return -EINVAL;
 
-		/* f->flags = ??; */
-		snprintf(f->description, sizeof(f->description), "%s",
-			 fmt->name);
-
 		f->pixelformat = dev->pix_format.pixelformat;
 	} else {
 		/* fill in a dummy format */
@@ -855,10 +846,10 @@ static int vidioc_enum_fmt_out(struct file *file, void *fh,
 		fmt = &formats[f->index];
 
 		f->pixelformat = fmt->fourcc;
-		snprintf(f->description, sizeof(f->description), "%s",
-			 fmt->name);
 	}
-	f->flags = 0;
+#if LINUX_VERSION_CODE < KERNEL_VERSION(4, 2, 0)
+	v4l_fill_fmtdesc(f);
+#endif
 
 	return 0;
 }
