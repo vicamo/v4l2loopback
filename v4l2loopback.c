@@ -286,9 +286,14 @@ static const struct v4l2_ctrl_config v4l2loopback_ctrl_timeoutimageio = {
 /* struct keeping state and settings of loopback device */
 
 struct v4l2l_buffer {
-	struct v4l2_buffer buffer;
+	/* common v4l buffer stuff -- must be first */
+	struct vb2_v4l2_buffer vb2_v4l2_buf;
+
 	struct list_head list_head;
 };
+
+#define to_v4l2l_buffer(buf)                                                   \
+	container_of(buf, struct v4l2l_buffer, vb2_v4l2_buf)
 
 struct v4l2_loopback_device {
 	struct v4l2_device v4l2_dev;
