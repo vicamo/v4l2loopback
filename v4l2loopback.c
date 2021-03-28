@@ -394,26 +394,6 @@ static const struct v4l2l_format *format_by_fourcc(int fourcc)
 	return NULL;
 }
 
-static void pix_format_set_size(struct v4l2_pix_format *f,
-				const struct v4l2l_format *fmt,
-				unsigned int width, unsigned int height)
-{
-	f->width = width;
-	f->height = height;
-
-	if (fmt->flags & FORMAT_FLAGS_PLANAR) {
-		f->bytesperline = width; /* Y plane */
-		f->sizeimage = (width * height * fmt->depth) >> 3;
-	} else if (fmt->flags & FORMAT_FLAGS_COMPRESSED) {
-		/* doesn't make sense for compressed formats */
-		f->bytesperline = 0;
-		f->sizeimage = (width * height * fmt->depth) >> 3;
-	} else {
-		f->bytesperline = (width * fmt->depth) >> 3;
-		f->sizeimage = height * f->bytesperline;
-	}
-}
-
 static int set_timeperframe(struct v4l2_loopback_device *dev,
 			    struct v4l2_fract *tpf)
 {
@@ -910,9 +890,8 @@ static int vidioc_try_fmt_out(struct file *file, void *fh,
 		if (NULL == format)
 			format = &formats[0];
 
-		pix_format_set_size(&fmt->fmt.pix, format, w, h);
-
-		fmt->fmt.pix.pixelformat = format->fourcc;
+		if (v4l2_fill_pixfmt(&fmt->fmt.pix, format->fourcc, w, h))
+			return -EINVAL;
 
 		if ((fmt->fmt.pix.colorspace == V4L2_COLORSPACE_DEFAULT) ||
 		    (fmt->fmt.pix.colorspace > V4L2_COLORSPACE_DCI_P3))
