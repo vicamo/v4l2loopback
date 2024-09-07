@@ -2032,6 +2032,7 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 	struct v4l2_ctrl_handler *hdl;
 
 	int err = -ENOMEM;
+	unsigned int index;
 
 	u32 _max_width = DEFAULT_FROM_CONF(
 		max_width, < V4L2LOOPBACK_SIZE_MIN_WIDTH, max_width);
@@ -2087,6 +2088,44 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 	snprintf(dev->v4l2_dev.name, sizeof(dev->v4l2_dev.name),
 		 "v4l2loopback-%03d", capture_nr);
 
+	spin_lock_init(&dev->lock);
+	INIT_LIST_HEAD(&dev->outbufs_list);
+	init_waitqueue_head(&dev->read_event);
+
+	dev->announce_all_caps = _announce_all_caps;
+	dev->max_width = _max_width;
+	dev->max_height = _max_height;
+	dev->ready_for_capture = 0;
+	dev->ready_for_output = 1;
+	dev->image = NULL;
+	dev->timeout_image = NULL;
+
+#ifdef HAVE_TIMER_SETUP
+	timer_setup(&dev->sustain_timer, sustain_timer_clb, 0);
+	timer_setup(&dev->timeout_timer, timeout_timer_clb, 0);
+#else
+	setup_timer(&dev->sustain_timer, sustain_timer_clb, capture_nr);
+	setup_timer(&dev->timeout_timer, timeout_timer_clb, capture_nr);
+#endif
+
+	init_capture_param(&dev->capture_param);
+	err = set_timeperframe(dev, &dev->capture_param.timeperframe);
+	if (err)
+		goto out_free_idr;
+
+	dev->buffers_number = dev->used_buffers = _max_buffers;
+	for (index = 0; index < dev->used_buffers; ++index)
+		list_add_tail(&dev->buffers[index].list_head,
+			      &dev->outbufs_list);
+
+	/* Set initial format */
+	dev->pix_format.width = 0; /* V4L2LOOPBACK_SIZE_DEFAULT_WIDTH; */
+	dev->pix_format.height = 0; /* V4L2LOOPBACK_SIZE_DEFAULT_HEIGHT; */
+	dev->pix_format.pixelformat = formats[0].format;
+	dev->pix_format.colorspace =
+		V4L2_COLORSPACE_SRGB; /* do we need to set this ? */
+	dev->pix_format.field = V4L2_FIELD_NONE;
+
 	err = v4l2_device_register(NULL, &dev->v4l2_dev);
 	if (err)
 		goto out_free_idr;
@@ -2103,53 +2142,11 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 
 	init_vdev(dev->vdev, conf->debug);
 	dev->vdev->v4l2_dev = &dev->v4l2_dev;
-	init_capture_param(&dev->capture_param);
-	err = set_timeperframe(dev, &dev->capture_param.timeperframe);
-	if (err)
-		goto out_unregister;
-	dev->keep_format = 0;
-	dev->sustain_framerate = 0;
-
-	dev->announce_all_caps = _announce_all_caps;
-	dev->max_width = _max_width;
-	dev->max_height = _max_height;
-	dev->buffers_number = dev->used_buffers = _max_buffers;
-
-	dev->write_position = 0;
-
-	spin_lock_init(&dev->lock);
-	INIT_LIST_HEAD(&dev->outbufs_list);
-	if (list_empty(&dev->outbufs_list)) {
-		int i;
-
-		for (i = 0; i < dev->used_buffers; ++i)
-			list_add_tail(&dev->buffers[i].list_head,
-				      &dev->outbufs_list);
-	}
-	memset(dev->bufpos2index, 0, sizeof(dev->bufpos2index));
-	atomic_set(&dev->open_count, 0);
-	dev->ready_for_capture = 0;
-	dev->ready_for_output = 1;
-
-	dev->buffer_size = 0;
-	dev->image = NULL;
-	dev->imagesize = 0;
-#ifdef HAVE_TIMER_SETUP
-	timer_setup(&dev->sustain_timer, sustain_timer_clb, 0);
-	timer_setup(&dev->timeout_timer, timeout_timer_clb, 0);
-#else
-	setup_timer(&dev->sustain_timer, sustain_timer_clb, capture_nr);
-	setup_timer(&dev->timeout_timer, timeout_timer_clb, capture_nr);
-#endif
-	dev->reread_count = 0;
-	dev->timeout_jiffies = 0;
-	dev->timeout_image = NULL;
-	dev->timeout_happened = 0;
 
 	hdl = &dev->ctrl_handler;
 	err = v4l2_ctrl_handler_init(hdl, 4);
 	if (err)
-		goto out_unregister;
+		goto out_free_vdev;
 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_keepformat, NULL);
 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_sustainframerate, NULL);
 	v4l2_ctrl_new_custom(hdl, &v4l2loopback_ctrl_timeout, NULL);
@@ -2164,40 +2161,21 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 	if (err)
 		goto out_free_handler;
 
-	/* FIXME set buffers to 0 */
-
-	/* Set initial format */
-	dev->pix_format.width = 0; /* V4L2LOOPBACK_SIZE_DEFAULT_WIDTH; */
-	dev->pix_format.height = 0; /* V4L2LOOPBACK_SIZE_DEFAULT_HEIGHT; */
-	dev->pix_format.pixelformat = formats[0].format;
-	dev->pix_format.colorspace =
-		V4L2_COLORSPACE_SRGB; /* do we need to set this ? */
-	dev->pix_format.field = V4L2_FIELD_NONE;
-
-	dev->buffer_size = PAGE_ALIGN(dev->pix_format.sizeimage);
-	dprintk("buffer_size = %ld (=%u)\n", dev->buffer_size,
-		dev->pix_format.sizeimage);
-
-	if (dev->buffer_size && ((err = allocate_buffers(dev)) < 0))
-		goto out_free_handler;
-
-	init_waitqueue_head(&dev->read_event);
-
 	/* register the device -> it creates /dev/video* */
 	if (video_register_device(dev->vdev, VFL_TYPE_VIDEO, capture_nr) < 0) {
 		printk(KERN_ERR
 		       "v4l2loopback: failed video_register_device()\n");
 		err = -EFAULT;
-		goto out_free_device;
+		goto out_free_handler;
 	}
 	v4l2loopback_create_sysfs(dev->vdev);
 
 	return dev;
 
-out_free_device:
-	video_device_release(dev->vdev);
 out_free_handler:
 	v4l2_ctrl_handler_free(&dev->ctrl_handler);
+out_free_vdev:
+	video_device_release(dev->vdev);
 out_unregister:
 	v4l2_device_unregister(&dev->v4l2_dev);
 out_free_idr:
