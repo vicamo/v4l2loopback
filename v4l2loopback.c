@@ -293,9 +293,6 @@ static const struct v4l2_ctrl_config v4l2loopback_ctrl_timeoutimageio = {
 };
 
 /* module structures */
-struct v4l2loopback_private {
-	int device_nr;
-};
 
 /* TODO(vasaka) use typenames which are common to kernel, but first find out if
  * it is needed */
@@ -551,17 +548,14 @@ static struct v4l2_loopback_device *v4l2loopback_lookup(int device_nr)
 static struct v4l2_loopback_device *v4l2loopback_cd2dev(struct device *cd)
 {
 	struct video_device *loopdev = to_video_device(cd);
-	struct v4l2loopback_private *ptr =
-		(struct v4l2loopback_private *)video_get_drvdata(loopdev);
-	int nr = ptr->device_nr;
+	int nr = PTR_ERR(video_get_drvdata(loopdev));
 
 	return idr_find(&v4l2loopback_index_idr, nr);
 }
 
 static struct v4l2_loopback_device *v4l2loopback_getdevice(struct file *f)
 {
-	struct v4l2loopback_private *ptr = video_drvdata(f);
-	int nr = ptr->device_nr;
+	int nr = PTR_ERR(video_drvdata(f));
 
 	return idr_find(&v4l2loopback_index_idr, nr);
 }
@@ -604,9 +598,7 @@ static int vidioc_querycap(struct file *file, void *priv,
 			   struct v4l2_capability *cap)
 {
 	struct v4l2_loopback_device *dev = v4l2loopback_getdevice(file);
-	int device_nr =
-		((struct v4l2loopback_private *)video_get_drvdata(dev->vdev))
-			->device_nr;
+	int device_nr = PTR_ERR(video_get_drvdata(dev->vdev));
 	__u32 capabilities = V4L2_CAP_STREAMING | V4L2_CAP_READWRITE;
 
 	strlcpy(cap->driver, "v4l2 loopback", sizeof(cap->driver));
@@ -2038,7 +2030,6 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 {
 	struct v4l2_loopback_device *dev;
 	struct v4l2_ctrl_handler *hdl;
-	struct v4l2loopback_private *vdev_priv = NULL;
 
 	int err = -ENOMEM;
 
@@ -2106,23 +2097,9 @@ v4l2_loopback_add(struct v4l2_loopback_config *conf)
 		goto out_unregister;
 	}
 
-	vdev_priv = kzalloc(sizeof(struct v4l2loopback_private), GFP_KERNEL);
-	if (vdev_priv == NULL) {
-		err = -ENOMEM;
-		goto out_unregister;
-	}
-
-	video_set_drvdata(dev->vdev, vdev_priv);
-	if (video_get_drvdata(dev->vdev) == NULL) {
-		err = -ENOMEM;
-		goto out_unregister;
-	}
-
-	MARK();
 	snprintf(dev->vdev->name, sizeof(dev->vdev->name), "%s",
 		 dev->card_label);
-
-	vdev_priv->device_nr = capture_nr;
+	video_set_drvdata(dev->vdev, ERR_PTR(capture_nr));
 
 	init_vdev(dev->vdev, conf->debug);
 	dev->vdev->v4l2_dev = &dev->v4l2_dev;
@@ -2222,9 +2199,6 @@ out_free_device:
 out_free_handler:
 	v4l2_ctrl_handler_free(&dev->ctrl_handler);
 out_unregister:
-	video_set_drvdata(dev->vdev, NULL);
-	if (vdev_priv != NULL)
-		kfree(vdev_priv);
 	v4l2_device_unregister(&dev->v4l2_dev);
 out_free_idr:
 	idr_remove(&v4l2loopback_index_idr, output_nr);
@@ -2239,7 +2213,6 @@ static void v4l2_loopback_remove(struct v4l2_loopback_device *dev)
 {
 	free_buffers(dev);
 	v4l2loopback_remove_sysfs(dev->vdev);
-	kfree(video_get_drvdata(dev->vdev));
 	video_unregister_device(dev->vdev);
 	v4l2_device_unregister(&dev->v4l2_dev);
 	v4l2_ctrl_handler_free(&dev->ctrl_handler);
